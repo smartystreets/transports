@@ -4,21 +4,22 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 )
 
 type ChannelWriter struct {
 	dialer   Dialer
 	address  string
-	writer   io.WriteCloser
-	incoming [][]byte
-	outgoing [][]byte
-	mutex    *sync.Mutex
 	capacity int
+	mutex    *sync.Mutex
+	incoming []channelMessage
+	outgoing []channelMessage
+	writer   io.WriteCloser
 	closed   bool
 }
 
 func NewChannelWriter(dialer Dialer, address string, capacity uint16) io.WriteCloser {
-	this := &ChannelWriter{dialer: dialer, address: address, mutex: &sync.Mutex{}}
+	this := &ChannelWriter{dialer: dialer, address: address, mutex: &sync.Mutex{}, capacity: int(capacity)}
 	go this.listen()
 	return this
 }
@@ -48,31 +49,48 @@ func (this *ChannelWriter) Close() error {
 
 func (this *ChannelWriter) listen() {
 	defer this.closeWriter()
-
-	for !this.closed {
-		this.swapBuffers()
+	for this.process() {
 	}
 }
-func (this *ChannelWriter) swapBuffers() {
+func (this *ChannelWriter) process() bool {
+	if closed, hasWork := this.read(); closed {
+		return false
+	} else if hasWork {
+		this.tryWrite()
+	} else {
+		time.Sleep(time.Millisecond) // waiting for work
+	}
+
+	return true
+}
+
+func (this *ChannelWriter) read() (closed bool, hasWork bool) {
 	this.mutex.Lock()
+	closed = this.closed
+	hasWork = len(this.incoming) > 0 || len(this.outgoing) > 0
+	this.swapBuffers()
+	this.mutex.Unlock()
+	return closed, hasWork
+}
+func (this *ChannelWriter) swapBuffers() {
+	if this.closed || len(this.outgoing) > 0 || len(this.incoming) == 0 {
+		return
+	}
 	temp := this.outgoing
 	this.outgoing = this.incoming
 	this.incoming = temp
-	this.mutex.Unlock()
 }
 
-func (this *ChannelWriter) ensureWrite() {
-	for !this.closed {
-		if !this.openWriter() {
-			continue
-		}
-
-		if this.writeBuffer() {
-			break // done
-		}
-
-		this.closeWriter() // write failed, close
+func (this *ChannelWriter) tryWrite() {
+	if !this.openWriter() {
+		return
 	}
+
+	if this.writeBuffer() {
+		return
+	}
+
+	this.closeWriter() // write failed, close
 }
 func (this *ChannelWriter) writeBuffer() bool {
 	for _, message := range this.outgoing {
@@ -103,3 +121,5 @@ func (this *ChannelWriter) closeWriter() {
 }
 
 var ErrChannelFull = errors.New("channel full")
+
+type channelMessage []byte
