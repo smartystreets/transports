@@ -3,58 +3,66 @@ package transports
 import (
 	"errors"
 	"io"
-	"sync/atomic"
+	"sync"
 )
 
 type ChannelWriter struct {
 	dialer   Dialer
 	address  string
-	channel  chan []byte
-	closed   uint64
 	writer   io.WriteCloser
-	buffered [][]byte
+	incoming [][]byte
+	outgoing [][]byte
+	mutex    *sync.Mutex
+	capacity int
+	closed   bool
 }
 
-func NewChannelWriter(dialer Dialer, address string, capacity int) io.WriteCloser {
-	this := &ChannelWriter{
-		dialer:  dialer,
-		address: address,
-		channel: make(chan []byte, capacity),
-	}
+func NewChannelWriter(dialer Dialer, address string, capacity uint16) io.WriteCloser {
+	this := &ChannelWriter{dialer: dialer, address: address, mutex: &sync.Mutex{}}
 	go this.listen()
 	return this
 }
 
 func (this *ChannelWriter) Write(buffer []byte) (int, error) {
-	select {
-	case this.channel <- buffer:
-		return len(buffer), nil
-	default:
+	this.mutex.Lock()
+	written, err := this.write(buffer)
+	this.mutex.Unlock()
+	return written, err
+}
+func (this *ChannelWriter) write(buffer []byte) (int, error) {
+	if this.closed {
+		return 0, ErrClosedSocket
+	}
+	if len(this.incoming) >= this.capacity {
 		return 0, ErrChannelFull
 	}
+	this.incoming = append(this.incoming, buffer)
+	return len(buffer), nil
 }
 func (this *ChannelWriter) Close() error {
-	if atomic.AddUint64(&this.closed, 1) == 1 {
-		close(this.channel)
-	}
+	this.mutex.Lock()
+	this.closed = true
+	this.mutex.Unlock()
 	return nil
-}
-func (this *ChannelWriter) isClosed() bool {
-	return atomic.LoadUint64(&this.closed) > 0
 }
 
 func (this *ChannelWriter) listen() {
 	defer this.closeWriter()
 
-	for message := range this.channel {
-		this.buffered = append(this.buffered, message)
-		if len(this.channel) == 0 {
-			this.ensureWrite()
-		}
+	for !this.closed {
+		this.swapBuffers()
 	}
 }
+func (this *ChannelWriter) swapBuffers() {
+	this.mutex.Lock()
+	temp := this.outgoing
+	this.outgoing = this.incoming
+	this.incoming = temp
+	this.mutex.Unlock()
+}
+
 func (this *ChannelWriter) ensureWrite() {
-	for !this.isClosed() {
+	for !this.closed {
 		if !this.openWriter() {
 			continue
 		}
@@ -63,19 +71,20 @@ func (this *ChannelWriter) ensureWrite() {
 			break // done
 		}
 
-		this.closeWriter()
+		this.closeWriter() // write failed, close
 	}
 }
 func (this *ChannelWriter) writeBuffer() bool {
-	for _, message := range this.buffered {
+	for _, message := range this.outgoing {
 		if _, err := this.writer.Write(message); err != nil {
 			return false
 		}
 	}
 
-	this.buffered = this.buffered[0:0]
+	this.outgoing = this.outgoing[0:0]
 	return true
 }
+
 func (this *ChannelWriter) openWriter() bool {
 	if this.writer != nil {
 		return true
