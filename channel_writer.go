@@ -12,14 +12,14 @@ type ChannelWriter struct {
 	address  string
 	capacity int
 	mutex    *sync.Mutex
-	incoming []channelMessage
-	outgoing []channelMessage
+	incoming [][]byte
+	outgoing [][]byte
 	writer   io.WriteCloser
 	closed   bool
 }
 
-func NewChannelWriter(dialer Dialer, address string, capacity uint16) io.WriteCloser {
-	this := &ChannelWriter{dialer: dialer, address: address, mutex: &sync.Mutex{}, capacity: int(capacity)}
+func NewChannelWriter(dialer Dialer, address string, capacity int) io.WriteCloser {
+	this := &ChannelWriter{dialer: dialer, address: address, mutex: &sync.Mutex{}, capacity: capacity}
 	go this.listen()
 	return this
 }
@@ -35,7 +35,7 @@ func (this *ChannelWriter) write(buffer []byte) (int, error) {
 		return 0, ErrClosedSocket
 	}
 	if len(this.incoming) >= this.capacity {
-		return 0, ErrChannelFull
+		return 0, ErrBufferFull
 	}
 	this.incoming = append(this.incoming, buffer)
 	return len(buffer), nil
@@ -120,6 +120,4 @@ func (this *ChannelWriter) closeWriter() {
 	}
 }
 
-var ErrChannelFull = errors.New("channel full")
-
-type channelMessage []byte
+var ErrBufferFull = errors.New("buffer full")
